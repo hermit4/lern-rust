@@ -36,7 +36,7 @@ fn main() -> ! {
     info!("Program start");
 
     let mut pac = pac::Peripherals::take().expect("PAC not available");
-    let _core = pac::CorePeripherals::take().unwrap();
+    let core = pac::CorePeripherals::take().expect("Core Peripherals not available");
 
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
     let sio = Sio::new(pac.SIO);
@@ -53,6 +53,7 @@ fn main() -> ! {
     )
     .ok()
     .unwrap();
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     let pins = bsp::Pins::new(
         pac.IO_BANK0,
@@ -74,7 +75,7 @@ fn main() -> ! {
         pac.I2C1,
         sda,
         scl,
-        100_000.Hz(),
+        300.kHz(),
         &mut pac.RESETS,
         &clocks.peripheral_clock,
     );
@@ -104,9 +105,9 @@ fn main() -> ! {
     uart.write_full_blocking(b"CST816S investigation\n");
 
     rst.set_low().unwrap();
-    cortex_m::asm::delay(12_000_000);
+    delay.delay_ms(100);
     rst.set_high().unwrap();
-    cortex_m::asm::delay(12_000_000);
+    delay.delay_ms(100);
 
     let mut buf = [0u8; 1];
     let status = i2c.write_read(CST816S_ADDR, &[REG_VERSION], &mut buf);
@@ -133,9 +134,16 @@ fn main() -> ! {
                     .is_ok()
                 {
                     let gesture = touch_data[0];
+                    let finger = touch_data[1];
                     let x = ((touch_data[2] as u16 & 0x0F) << 8) | touch_data[3] as u16;
                     let y = ((touch_data[4] as u16 & 0x0F) << 8) | touch_data[5] as u16;
-                    defmt::info!("Gesture: {}, X: {}, Y: {}", gesture, x, y);
+                    defmt::info!(
+                        "Gesture: {}, X: {}, Y: {}, finger: {}",
+                        gesture,
+                        x,
+                        y,
+                        finger
+                    );
                 }
                 IRQ_PIN
                     .borrow(cs)
