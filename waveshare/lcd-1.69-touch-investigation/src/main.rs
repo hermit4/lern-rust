@@ -9,26 +9,25 @@ use crate::pac::interrupt;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 use cortex_m::interrupt::Mutex;
-use embedded_hal::{
-    digital::{InputPin,OutputPin},
-    spi::SpiBus,
-    i2c::I2c,
-};
-use rp2040_hal as hal;
 use defmt::*;
 use defmt_rtt as _;
-use panic_probe as _;
+use embedded_hal::{
+    digital::{InputPin, OutputPin},
+    i2c::I2c,
+    spi::SpiBus,
+};
 use hal::{
-    clocks::{init_clocks_and_plls,Clock},
+    clocks::{init_clocks_and_plls, Clock},
+    entry,
     fugit::{Hertz, RateExtU32},
     gpio::{bank0::*, Interrupt as GpioInterrupt, Pin, PullUp},
-    entry,
     pac,
     sio::Sio,
-    Spi,
     watchdog::Watchdog,
-    I2C,
+    Spi, I2C,
 };
+use panic_probe as _;
+use rp2040_hal as hal;
 
 const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(16_000_000);
 const CST816S_ADDR: u8 = 0x15;
@@ -95,9 +94,6 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    //------------------------
-    // I2C
-    //------------------------
     let tp_sda = pins
         .gpio6
         .into_pull_up_input()
@@ -152,7 +148,6 @@ fn main() -> ! {
     );
     let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc);
 
-
     let mut buf = [0u8; 1];
     let status = i2c.write_read(CST816S_ADDR, &[REG_VERSION], &mut buf);
     match status {
@@ -178,9 +173,9 @@ fn main() -> ! {
     lcd_bl.set_high().unwrap();
 
     st7789.write_command(0x2A); // Column
-    st7789.write_data(&[0x00,0x00, 0x00,0xEF]);
+    st7789.write_data(&[0x00, 0x00, 0x00, 0xEF]);
     st7789.write_command(0x2B); // Row
-    st7789.write_data(&[0x00,0x14, 0x01,0x2B]);
+    st7789.write_data(&[0x00, 0x14, 0x01, 0x2B]);
     st7789.write_command(0x2C);
     delay.delay_ms(100);
 
@@ -194,8 +189,8 @@ fn main() -> ! {
     let mut pixel_data = [0u8; 240 * 2];
 
     for &color in &test_colors {
-        let hi = !(color >> 8) as u8;    // LCD bug? invert bits
-        let lo = !(color & 0xFF) as u8;  // LCD bug? invert bits
+        let hi = !(color >> 8) as u8; // LCD bug? invert bits
+        let lo = !(color & 0xFF) as u8; // LCD bug? invert bits
         for px in pixel_data.chunks_exact_mut(2) {
             px[0] = hi;
             px[1] = lo;
