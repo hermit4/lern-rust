@@ -33,6 +33,8 @@ const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(16_000_000);
 const CST816S_ADDR: u8 = 0x15;
 const REG_VERSION: u8 = 0xA7;
 const REG_DATA: u8 = 0x01;
+const SCREEN_HEIGHT: usize = 280;
+const BAND_HEIGHT: usize = 56;
 
 type IrqPin = Pin<Gpio21, hal::gpio::FunctionSio<hal::gpio::SioInput>, PullUp>;
 static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
@@ -65,6 +67,30 @@ where
         self.dc.set_high().ok();
         self.spi.write(data).ok();
         self.cs.set_high().ok();
+    }
+}
+
+fn redraw_screen<SPI, CS, DC>(
+    st7789: &mut St7789Interface<SPI, CS, DC>,
+    offset: usize,
+    test_colors: &[u16],
+    pixel_data: &mut [u8],
+) where
+    SPI: SpiBus,
+    CS: OutputPin,
+    DC: OutputPin,
+{
+    for y in 0..SCREEN_HEIGHT {
+        let logical_y = (offset + y) % SCREEN_HEIGHT;
+        let band = logical_y / BAND_HEIGHT;
+        let color = test_colors[band];
+        let hi = !(color >> 8) as u8;
+        let lo = !(color & 0xFF) as u8;
+        for px in pixel_data.chunks_exact_mut(2) {
+            px[0] = hi;
+            px[1] = lo;
+        }
+        st7789.write_data(pixel_data);
     }
 }
 
@@ -187,19 +213,8 @@ fn main() -> ! {
         0x0000, // Black
     ];
     let mut pixel_data = [0u8; 240 * 2];
-
-    for &color in &test_colors {
-        let hi = !(color >> 8) as u8; // LCD bug? invert bits
-        let lo = !(color & 0xFF) as u8; // LCD bug? invert bits
-        for px in pixel_data.chunks_exact_mut(2) {
-            px[0] = hi;
-            px[1] = lo;
-        }
-
-        for _ in 0..56 {
-            st7789.write_data(&pixel_data);
-        }
-    }
+    let mut scroll_offset = 0;
+    redraw_screen(&mut st7789, scroll_offset, &test_colors, &mut pixel_data);
     loop {
         cortex_m::interrupt::free(|cs| {
             if TOUCH_IRQ_PENDING.load(Ordering::Acquire) {
@@ -213,6 +228,27 @@ fn main() -> ! {
                     let finger = touch_data[1];
                     let x = ((touch_data[2] as u16 & 0x0F) << 8) | touch_data[3] as u16;
                     let y = ((touch_data[4] as u16 & 0x0F) << 8) | touch_data[5] as u16;
+                    match gesture {
+                        0x02 => {
+                            scroll_offset = (scroll_offset + 10) % SCREEN_HEIGHT;
+                            redraw_screen(
+                                &mut st7789,
+                                scroll_offset,
+                                &test_colors,
+                                &mut pixel_data,
+                            );
+                        }
+                        0x01 => {
+                            scroll_offset = (scroll_offset + SCREEN_HEIGHT - 10) % SCREEN_HEIGHT;
+                            redraw_screen(
+                                &mut st7789,
+                                scroll_offset,
+                                &test_colors,
+                                &mut pixel_data,
+                            );
+                        }
+                        _ => {}
+                    }
                     defmt::info!(
                         "Gesture: {}, X: {}, Y: {}, finger: {}",
                         gesture,
