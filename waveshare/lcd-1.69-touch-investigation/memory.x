@@ -12,4 +12,8 @@ SECTIONS {
     {
         KEEP(*(.boot2));
     } > BOOT2
+    .defmt.rtt :
+    {
+        KEEP(*(.defmt.rtt));
+    } > RAM
 } INSERT BEFORE .text;

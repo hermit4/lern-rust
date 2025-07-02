@@ -1,46 +1,81 @@
 #![no_std]
 #![no_main]
 
+#[link_section = ".boot2"]
+#[used]
+static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
+
 use crate::pac::interrupt;
-use bsp::entry;
-use bsp::hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    fugit::RateExtU32,
-    gpio::{self, Interrupt as GpioInterrupt},
-    pac,
-    sio::Sio,
-    uart::{DataBits, StopBits, UartConfig},
-    watchdog::Watchdog,
-    I2C,
-};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 use cortex_m::interrupt::Mutex;
+use embedded_hal::{
+    digital::{InputPin,OutputPin},
+    spi::SpiBus,
+    i2c::I2c,
+};
+use rp2040_hal as hal;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_hal::i2c::I2c;
 use panic_probe as _;
-use rp_pico as bsp;
+use hal::{
+    clocks::{init_clocks_and_plls,Clock},
+    fugit::{Hertz, RateExtU32},
+    gpio::{bank0::*, Interrupt as GpioInterrupt, Pin, PullUp},
+    entry,
+    pac,
+    sio::Sio,
+    Spi,
+    watchdog::Watchdog,
+    I2C,
+};
 
-type IrqPin = gpio::Pin<gpio::bank0::Gpio21, gpio::FunctionSio<gpio::SioInput>, gpio::PullUp>;
-static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
-static TOUCH_IRQ_PENDING: AtomicBool = AtomicBool::new(false);
-
+const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(16_000_000);
 const CST816S_ADDR: u8 = 0x15;
 const REG_VERSION: u8 = 0xA7;
 const REG_DATA: u8 = 0x01;
 
+type IrqPin = Pin<Gpio21, hal::gpio::FunctionSio<hal::gpio::SioInput>, PullUp>;
+static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
+static TOUCH_IRQ_PENDING: AtomicBool = AtomicBool::new(false);
+
+pub struct St7789Interface<SPI, CS, DC> {
+    spi: SPI,
+    cs: CS,
+    dc: DC,
+}
+
+impl<SPI, CS, DC> St7789Interface<SPI, CS, DC>
+where
+    SPI: SpiBus,
+    CS: OutputPin,
+    DC: OutputPin,
+{
+    pub fn new(spi: SPI, cs: CS, dc: DC) -> Self {
+        Self { spi, cs, dc }
+    }
+    pub fn write_command(&mut self, cmd: u8) {
+        self.cs.set_low().ok();
+        self.dc.set_low().ok();
+        self.spi.write(&[cmd]).ok();
+        self.cs.set_high().ok();
+    }
+
+    pub fn write_data(&mut self, data: &[u8]) {
+        self.cs.set_low().ok();
+        self.dc.set_high().ok();
+        self.spi.write(data).ok();
+        self.cs.set_high().ok();
+    }
+}
+
 #[entry]
 fn main() -> ! {
     info!("Program start");
-
-    let mut pac = pac::Peripherals::take().expect("PAC not available");
-    let core = pac::CorePeripherals::take().expect("Core Peripherals not available");
-
+    let mut pac = pac::Peripherals::take().unwrap();
+    let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
     let sio = Sio::new(pac.SIO);
-
     let external_xtal_freq_hz = 12_000_000u32;
     let clocks = init_clocks_and_plls(
         external_xtal_freq_hz,
@@ -53,40 +88,31 @@ fn main() -> ! {
     )
     .ok()
     .unwrap();
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-
-    let pins = bsp::Pins::new(
+    let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
 
-    let sda = pins
+    //------------------------
+    // I2C
+    //------------------------
+    let tp_sda = pins
         .gpio6
         .into_pull_up_input()
-        .into_function::<bsp::hal::gpio::FunctionI2C>();
-    let scl = pins
+        .into_function::<hal::gpio::FunctionI2C>();
+    let tp_scl = pins
         .gpio7
         .into_pull_up_input()
-        .into_function::<bsp::hal::gpio::FunctionI2C>();
-
-    let mut i2c = I2C::i2c1(
-        pac.I2C1,
-        sda,
-        scl,
-        300.kHz(),
-        &mut pac.RESETS,
-        &clocks.peripheral_clock,
-    );
-
-    let mut rst = pins.gpio22.into_push_pull_output();
-    rst.set_high().unwrap();
-
-    let irq = pins.gpio21.into_pull_up_input();
-
+        .into_function::<hal::gpio::FunctionI2C>();
+    let mut tp_rst = pins.gpio22.into_push_pull_output();
+    let tp_irq = pins
+        .gpio21
+        .into_pull_up_input()
+        .into_function::<hal::gpio::FunctionSio<hal::gpio::SioInput>>();
     cortex_m::interrupt::free(|cs| {
-        IRQ_PIN.borrow(cs).replace(Some(irq));
+        IRQ_PIN.borrow(cs).replace(Some(tp_irq));
         IRQ_PIN
             .borrow(cs)
             .borrow()
@@ -94,36 +120,91 @@ fn main() -> ! {
             .unwrap()
             .set_interrupt_enabled(GpioInterrupt::LevelLow, true);
     });
+    let mut i2c = I2C::i2c1(
+        pac.I2C1,
+        tp_sda,
+        tp_scl,
+        300.kHz(),
+        &mut pac.RESETS,
+        &clocks.peripheral_clock,
+    );
 
-    let uart_pins = (pins.gpio0.into_function(), pins.gpio1.into_function());
-    let uart = bsp::hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
-        .enable(
-            UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
-            clocks.peripheral_clock.freq(),
-        )
-        .unwrap();
-    uart.write_full_blocking(b"CST816S investigation\n");
+    let lcd_dc = pins.gpio8.into_push_pull_output();
+    let lcd_cs = pins.gpio9.into_push_pull_output();
+    let lcd_clk = pins.gpio10.into_function::<hal::gpio::FunctionSpi>();
+    let lcd_din = pins.gpio11.into_function::<hal::gpio::FunctionSpi>();
+    let mut lcd_rst = pins.gpio13.into_push_pull_output();
+    let mut lcd_bl = pins.gpio15.into_push_pull_output();
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
-    rst.set_low().unwrap();
+    tp_rst.set_low().unwrap();
+    lcd_rst.set_low().unwrap();
     delay.delay_ms(100);
-    rst.set_high().unwrap();
-    delay.delay_ms(100);
+    tp_rst.set_high().unwrap();
+    lcd_rst.set_high().unwrap();
+    delay.delay_ms(200);
+
+    let spi = Spi::<_, _, _, 8>::new(pac.SPI1, (lcd_din, lcd_clk)).init(
+        &mut pac.RESETS,
+        clocks.peripheral_clock.freq(),
+        SPI_ST7789VW_MAX_FREQ,
+        embedded_hal::spi::MODE_3,
+    );
+    let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc);
+
 
     let mut buf = [0u8; 1];
     let status = i2c.write_read(CST816S_ADDR, &[REG_VERSION], &mut buf);
     match status {
-        Ok(_) => {
-            defmt::info!("CST816S version: 0x{:02X}", buf[0]);
-        }
-        Err(e) => {
-            defmt::warn!("I2C error: {:?}", defmt::Debug2Format(&e));
-        }
+        Ok(_) => defmt::info!("CST816S version: 0x{:02X}", buf[0]),
+        Err(e) => defmt::warn!("I2C error: {:?}", defmt::Debug2Format(&e)),
     }
 
     unsafe {
         pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
     }
 
+    st7789.write_command(0x01); // software reset
+    delay.delay_ms(100);
+    st7789.write_command(0x11); // sleep out
+    delay.delay_ms(100);
+    st7789.write_command(0x3A); // pixel format
+    st7789.write_data(&[0x55]); // RGB565
+    st7789.write_command(0x36); // MADCTL
+    st7789.write_data(&[0x00]); // BGR, no rotet
+    delay.delay_ms(100);
+    st7789.write_command(0x29); // Display on
+    delay.delay_ms(100);
+    lcd_bl.set_high().unwrap();
+
+    st7789.write_command(0x2A); // Column
+    st7789.write_data(&[0x00,0x00, 0x00,0xEF]);
+    st7789.write_command(0x2B); // Row
+    st7789.write_data(&[0x00,0x14, 0x01,0x2B]);
+    st7789.write_command(0x2C);
+    delay.delay_ms(100);
+
+    let test_colors = [
+        0xF800, // Red
+        0x07E0, // Green
+        0x001F, // Blue
+        0xFFFF, // White
+        0x0000, // Black
+    ];
+    let mut pixel_data = [0u8; 240 * 2];
+
+    for &color in &test_colors {
+        let hi = !(color >> 8) as u8;    // LCD bug? invert bits
+        let lo = !(color & 0xFF) as u8;  // LCD bug? invert bits
+        for px in pixel_data.chunks_exact_mut(2) {
+            px[0] = hi;
+            px[1] = lo;
+        }
+
+        for _ in 0..56 {
+            st7789.write_data(&pixel_data);
+        }
+    }
     loop {
         cortex_m::interrupt::free(|cs| {
             if TOUCH_IRQ_PENDING.load(Ordering::Acquire) {
@@ -161,11 +242,11 @@ fn main() -> ! {
 fn IO_IRQ_BANK0() {
     cortex_m::interrupt::free(|cs| {
         let mut pin = IRQ_PIN.borrow(cs).borrow_mut();
-        let pin = pin.as_mut().unwrap();
-        if pin.is_low().unwrap_or(false) {
+        let tp_irq = pin.as_mut().unwrap();
+        tp_irq.set_interrupt_enabled(GpioInterrupt::LevelLow, false);
+        if tp_irq.is_low().unwrap_or(false) {
             TOUCH_IRQ_PENDING.store(true, Ordering::Release);
         }
-        pin.set_interrupt_enabled(GpioInterrupt::LevelLow, false);
-        pin.clear_interrupt(GpioInterrupt::LevelLow);
+        tp_irq.clear_interrupt(GpioInterrupt::LevelLow);
     });
 }
