@@ -213,6 +213,7 @@ fn main() -> ! {
         0x0000, // Black
     ];
     let mut pixel_data = [0u8; 240 * 2];
+    let mut prev_y: u16 = (SCREEN_HEIGHT + 1) as u16;
     let mut scroll_offset = 0;
     redraw_screen(&mut st7789, scroll_offset, &test_colors, &mut pixel_data);
     loop {
@@ -228,26 +229,19 @@ fn main() -> ! {
                     let finger = touch_data[1];
                     let x = ((touch_data[2] as u16 & 0x0F) << 8) | touch_data[3] as u16;
                     let y = ((touch_data[4] as u16 & 0x0F) << 8) | touch_data[5] as u16;
-                    match gesture {
-                        0x02 => {
-                            scroll_offset = (scroll_offset + 10) % SCREEN_HEIGHT;
-                            redraw_screen(
-                                &mut st7789,
-                                scroll_offset,
-                                &test_colors,
-                                &mut pixel_data,
-                            );
+                    if prev_y > SCREEN_HEIGHT as u16 {
+                        prev_y = y;
+                    }
+                    if prev_y.abs_diff(y) > 1 && finger == 1 {
+                        if prev_y > y {
+                            scroll_offset =
+                                (scroll_offset + prev_y.abs_diff(y) as usize) % SCREEN_HEIGHT;
+                        } else {
+                            scroll_offset =
+                                (scroll_offset - prev_y.abs_diff(y) as usize) % SCREEN_HEIGHT;
                         }
-                        0x01 => {
-                            scroll_offset = (scroll_offset + SCREEN_HEIGHT - 10) % SCREEN_HEIGHT;
-                            redraw_screen(
-                                &mut st7789,
-                                scroll_offset,
-                                &test_colors,
-                                &mut pixel_data,
-                            );
-                        }
-                        _ => {}
+                        redraw_screen(&mut st7789, scroll_offset, &test_colors, &mut pixel_data);
+                        prev_y = y;
                     }
                     defmt::info!(
                         "Gesture: {}, X: {}, Y: {}, finger: {}",
