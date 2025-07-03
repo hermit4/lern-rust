@@ -24,12 +24,12 @@ use hal::{
     pac,
     sio::Sio,
     watchdog::Watchdog,
-    Spi, I2C,
+    Spi, Timer, I2C,
 };
 use panic_probe as _;
 use rp2040_hal as hal;
 
-const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(16_000_000);
+const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(33_300_000);
 const CST816S_ADDR: u8 = 0x15;
 const REG_VERSION: u8 = 0xA7;
 const REG_DATA: u8 = 0x01;
@@ -72,6 +72,7 @@ where
 
 fn redraw_screen<SPI, CS, DC>(
     st7789: &mut St7789Interface<SPI, CS, DC>,
+    timer: &mut Timer,
     offset: usize,
     test_colors: &[u16],
     pixel_data: &mut [u8],
@@ -80,6 +81,7 @@ fn redraw_screen<SPI, CS, DC>(
     CS: OutputPin,
     DC: OutputPin,
 {
+    let start = timer.get_counter();
     for y in 0..SCREEN_HEIGHT {
         let logical_y = (offset + y) % SCREEN_HEIGHT;
         let band = logical_y / BAND_HEIGHT;
@@ -92,6 +94,9 @@ fn redraw_screen<SPI, CS, DC>(
         }
         st7789.write_data(pixel_data);
     }
+    let end = timer.get_counter();
+    let micros = (end - start).to_micros();
+    defmt::info!("draw: {}us (FPS = {})", micros, 1_000_000 / micros);
 }
 
 #[entry]
@@ -196,7 +201,6 @@ fn main() -> ! {
     delay.delay_ms(100);
     st7789.write_command(0x29); // Display on
     delay.delay_ms(100);
-    lcd_bl.set_high().unwrap();
 
     st7789.write_command(0x2A); // Column
     st7789.write_data(&[0x00, 0x00, 0x00, 0xEF]);
@@ -215,7 +219,15 @@ fn main() -> ! {
     let mut pixel_data = [0u8; 240 * 2];
     let mut prev_y: u16 = (SCREEN_HEIGHT + 1) as u16;
     let mut scroll_offset = 0;
-    redraw_screen(&mut st7789, scroll_offset, &test_colors, &mut pixel_data);
+    let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    redraw_screen(
+        &mut st7789,
+        &mut timer,
+        scroll_offset,
+        &test_colors,
+        &mut pixel_data,
+    );
+    lcd_bl.set_high().unwrap();
     loop {
         cortex_m::interrupt::free(|cs| {
             if TOUCH_IRQ_PENDING.load(Ordering::Acquire) {
@@ -232,7 +244,9 @@ fn main() -> ! {
                     if prev_y > SCREEN_HEIGHT as u16 {
                         prev_y = y;
                     }
-                    if prev_y.abs_diff(y) > 1 && finger == 1 {
+                    if finger == 0 {
+                        prev_y = (SCREEN_HEIGHT + 1) as u16;
+                    } else if prev_y.abs_diff(y) > 1 {
                         if prev_y > y {
                             scroll_offset =
                                 (scroll_offset + prev_y.abs_diff(y) as usize) % SCREEN_HEIGHT;
@@ -240,7 +254,13 @@ fn main() -> ! {
                             scroll_offset =
                                 (scroll_offset - prev_y.abs_diff(y) as usize) % SCREEN_HEIGHT;
                         }
-                        redraw_screen(&mut st7789, scroll_offset, &test_colors, &mut pixel_data);
+                        redraw_screen(
+                            &mut st7789,
+                            &mut timer,
+                            scroll_offset,
+                            &test_colors,
+                            &mut pixel_data,
+                        );
                         prev_y = y;
                     }
                     defmt::info!(
