@@ -21,6 +21,7 @@ use hal::{
     clocks::{init_clocks_and_plls, Clock},
     entry,
     fugit::{Hertz, RateExtU32},
+    dma::{DMAExt ,ChannelIndex},
     gpio::{bank0::*, FunctionI2C, Interrupt as GpioInterrupt, Pin, PullUp},
     pac,
     sio::Sio,
@@ -36,6 +37,7 @@ const REG_VERSION: u8 = 0xA7;
 const REG_DATA: u8 = 0x01;
 const SCREEN_HEIGHT: usize = 280;
 const BAND_HEIGHT: usize = 56;
+const TRANSFER_SIZE: usize = 240 * 2;
 
 type IrqPin = Pin<Gpio21, hal::gpio::FunctionSio<hal::gpio::SioInput>, PullUp>;
 type SharedI2C = I2C<
@@ -51,6 +53,7 @@ static TOUCH_X: AtomicU16 = AtomicU16::new(0);
 static TOUCH_Y: AtomicU16 = AtomicU16::new(0);
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 static G_I2C: Mutex<RefCell<Option<SharedI2C>>> = Mutex::new(RefCell::new(None));
+static mut TX_BUFFER: [u8; TRANSFER_SIZE] = [0; TRANSFER_SIZE];
 pub struct St7789Interface<SPI, CS, DC> {
     spi: SPI,
     cs: CS,
@@ -59,7 +62,7 @@ pub struct St7789Interface<SPI, CS, DC> {
 
 impl<SPI, CS, DC> St7789Interface<SPI, CS, DC>
 where
-    SPI: SpiBus,
+    SPI: SpiBus + rp2040_hal::dma::WriteTarget<TransmittedWord = u8>,
     CS: OutputPin,
     DC: OutputPin,
 {
@@ -79,31 +82,63 @@ where
         self.spi.write(data).ok();
         self.cs.set_high().ok();
     }
+    pub fn write_dma_blocking<CHI>(
+        &mut self,
+        ch : &mut rp2040_hal::dma::Channel<CHI>,
+        buf: &'static [u8],
+    ) where
+        CHI: rp2040_hal::dma::ChannelIndex,
+    {
+        use rp2040_hal::dma::single_buffer::Config;
+        use core::ptr;
+
+        self.cs.set_low().ok();
+        self.dc.set_high().ok();
+
+        let spi_owned     = unsafe { ptr::read(&self.spi) };
+        let channel_owned = unsafe { ptr::read(ch) };
+        let (ch_back, _buf_back, spi_back) = unsafe {
+            Config::new(channel_owned, buf, spi_owned)
+                .start()
+                .wait()
+        };
+        unsafe {
+            ptr::write(ch, ch_back);
+            ptr::write(&mut self.spi, spi_back);
+        }
+        self.spi.flush().ok();
+        self.cs.set_high().ok();
+    }
 }
 
-fn redraw_screen<SPI, CS, DC>(
-    st7789: &mut St7789Interface<SPI, CS, DC>,
-    timer: &mut Timer,
-    offset: usize,
-    test_colors: &[u16],
-    pixel_data: &mut [u8],
+
+fn redraw_screen<SPI, CS, DC, CHI>(
+    st7789 : &mut St7789Interface<SPI, CS, DC>,
+    dma_ch : &mut rp2040_hal::dma::Channel<CHI>,
+    timer  : &mut Timer,
+    offset : usize,
+    colors : &[u16],
 ) where
-    SPI: SpiBus,
-    CS: OutputPin,
-    DC: OutputPin,
+    SPI: SpiBus<u8> + rp2040_hal::dma::WriteTarget<TransmittedWord = u8>,
+    CS : OutputPin,
+    DC : OutputPin,
+    CHI: ChannelIndex,
 {
     let start = timer.get_counter();
     for y in 0..SCREEN_HEIGHT {
         let logical_y = (offset + y) % SCREEN_HEIGHT;
         let band = logical_y / BAND_HEIGHT;
-        let color = test_colors[band];
+        let color = colors[band];
         let hi = !(color >> 8) as u8;
         let lo = !(color & 0xFF) as u8;
-        for px in pixel_data.chunks_exact_mut(2) {
-            px[0] = hi;
-            px[1] = lo;
+        unsafe {
+            for px in TX_BUFFER.chunks_exact_mut(2) {
+                px[0] = hi;
+                px[1] = lo;
+            }
         }
-        st7789.write_data(pixel_data);
+        st7789.write_dma_blocking(dma_ch, unsafe { &TX_BUFFER });
+        //st7789.write_data(unsafe{&TX_BUFFER});
     }
     let end = timer.get_counter();
     let micros = (end - start).to_micros();
@@ -219,6 +254,8 @@ fn main() -> ! {
         SPI_ST7789VW_MAX_FREQ,
         embedded_hal::spi::MODE_3,
     );
+
+    let mut dma_ch0 = pac.DMA.split(&mut pac.RESETS).ch0;
     let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc);
 
     let mut buf = [0u8; 1];
@@ -264,16 +301,15 @@ fn main() -> ! {
         0xFFFF, // White
         0x0000, // Black
     ];
-    let mut pixel_data = [0u8; 240 * 2];
     let mut prev_y: u16 = (SCREEN_HEIGHT + 1) as u16;
     let mut scroll_offset = 0;
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     redraw_screen(
         &mut st7789,
+        &mut dma_ch0,
         &mut timer,
         scroll_offset,
         &test_colors,
-        &mut pixel_data,
     );
     lcd_bl.set_high().unwrap();
     loop {
@@ -298,10 +334,10 @@ fn main() -> ! {
         if scroll_offset_changed {
             redraw_screen(
                 &mut st7789,
+                &mut dma_ch0,
                 &mut timer,
                 scroll_offset,
                 &test_colors,
-                &mut pixel_data,
             );
         }
         cortex_m::asm::wfe();
