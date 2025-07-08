@@ -129,8 +129,8 @@ fn redraw_screen<SPI, CS, DC, CHI>(
         let logical_y = (offset + y) % SCREEN_HEIGHT;
         let band = logical_y / BAND_HEIGHT;
         let color = colors[band];
-        let hi = !(color >> 8) as u8;
-        let lo = !(color & 0xFF) as u8;
+        let hi = (color >> 8) as u8;
+        let lo = (color & 0xFF) as u8;
         unsafe {
             for px in TX_BUFFER.chunks_exact_mut(2) {
                 px[0] = hi;
@@ -276,23 +276,22 @@ fn main() -> ! {
     let _ = core1.spawn(unsafe { CORE1_STACK.take().unwrap() }, touch_task);
 
     st7789.write_command(0x01); // software reset
-    delay.delay_ms(100);
+    delay.delay_ms(120);
     st7789.write_command(0x11); // sleep out
-    delay.delay_ms(100);
+    delay.delay_ms(120);
     st7789.write_command(0x3A); // pixel format
     st7789.write_data(&[0x55]); // RGB565
     st7789.write_command(0x36); // MADCTL
     st7789.write_data(&[0x00]); // BGR, no rotet
-    delay.delay_ms(100);
+    st7789.write_command(0x21); // INVON
     st7789.write_command(0x29); // Display on
-    delay.delay_ms(100);
+    delay.delay_ms(20);
 
     st7789.write_command(0x2A); // Column
     st7789.write_data(&[0x00, 0x00, 0x00, 0xEF]);
     st7789.write_command(0x2B); // Row
     st7789.write_data(&[0x00, 0x14, 0x01, 0x2B]);
     st7789.write_command(0x2C);
-    delay.delay_ms(100);
 
     let test_colors = [
         0xF800, // Red
