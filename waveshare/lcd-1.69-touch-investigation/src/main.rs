@@ -21,7 +21,7 @@ use hal::{
     clocks::{init_clocks_and_plls, Clock},
     entry,
     fugit::{Hertz, RateExtU32},
-    dma::{DMAExt ,ChannelIndex},
+    dma::{DMAExt ,ChannelIndex, Channel},
     gpio::{bank0::*, FunctionI2C, Interrupt as GpioInterrupt, Pin, PullUp},
     pac,
     sio::Sio,
@@ -54,20 +54,25 @@ static TOUCH_Y: AtomicU16 = AtomicU16::new(0);
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 static G_I2C: Mutex<RefCell<Option<SharedI2C>>> = Mutex::new(RefCell::new(None));
 static mut TX_BUFFER: [u8; TRANSFER_SIZE] = [0; TRANSFER_SIZE];
-pub struct St7789Interface<SPI, CS, DC> {
+pub struct St7789Interface<SPI, CS, DC, CHI>
+where
+    CHI: ChannelIndex,
+{
     spi: SPI,
     cs: CS,
     dc: DC,
+    dma_ch: Channel<CHI>,
 }
 
-impl<SPI, CS, DC> St7789Interface<SPI, CS, DC>
+impl<SPI, CS, DC, CHI> St7789Interface<SPI, CS, DC, CHI>
 where
     SPI: SpiBus + rp2040_hal::dma::WriteTarget<TransmittedWord = u8>,
     CS: OutputPin,
     DC: OutputPin,
+    CHI: ChannelIndex,
 {
-    pub fn new(spi: SPI, cs: CS, dc: DC) -> Self {
-        Self { spi, cs, dc }
+    pub fn new(spi: SPI, cs: CS, dc: DC, dma_ch: Channel<CHI>) -> Self {
+        Self { spi, cs, dc, dma_ch }
     }
     pub fn write_command(&mut self, cmd: u8) {
         self.cs.set_low().ok();
@@ -82,13 +87,10 @@ where
         self.spi.write(data).ok();
         self.cs.set_high().ok();
     }
-    pub fn write_dma_blocking<CHI>(
+    pub fn write_dma_blocking(
         &mut self,
-        ch : &mut rp2040_hal::dma::Channel<CHI>,
         buf: &'static [u8],
-    ) where
-        CHI: rp2040_hal::dma::ChannelIndex,
-    {
+    ){
         use rp2040_hal::dma::single_buffer::Config;
         use core::ptr;
 
@@ -96,14 +98,10 @@ where
         self.dc.set_high().ok();
 
         let spi_owned     = unsafe { ptr::read(&self.spi) };
-        let channel_owned = unsafe { ptr::read(ch) };
-        let (ch_back, _buf_back, spi_back) = unsafe {
-            Config::new(channel_owned, buf, spi_owned)
-                .start()
-                .wait()
-        };
+        let channel_owned = unsafe { ptr::read(&self.dma_ch) };
+        let (ch_back, _buf_back, spi_back) = Config::new(channel_owned, buf, spi_owned).start().wait();
         unsafe {
-            ptr::write(ch, ch_back);
+            ptr::write(&mut self.dma_ch, ch_back);
             ptr::write(&mut self.spi, spi_back);
         }
         self.spi.flush().ok();
@@ -113,8 +111,7 @@ where
 
 
 fn redraw_screen<SPI, CS, DC, CHI>(
-    st7789 : &mut St7789Interface<SPI, CS, DC>,
-    dma_ch : &mut rp2040_hal::dma::Channel<CHI>,
+    st7789 : &mut St7789Interface<SPI, CS, DC, CHI>,
     timer  : &mut Timer,
     offset : usize,
     colors : &[u16],
@@ -137,7 +134,7 @@ fn redraw_screen<SPI, CS, DC, CHI>(
                 px[1] = lo;
             }
         }
-        st7789.write_dma_blocking(dma_ch, unsafe { &TX_BUFFER });
+        st7789.write_dma_blocking(unsafe { &TX_BUFFER });
         //st7789.write_data(unsafe{&TX_BUFFER});
     }
     let end = timer.get_counter();
@@ -255,8 +252,8 @@ fn main() -> ! {
         embedded_hal::spi::MODE_3,
     );
 
-    let mut dma_ch0 = pac.DMA.split(&mut pac.RESETS).ch0;
-    let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc);
+    let dma_ch = pac.DMA.split(&mut pac.RESETS).ch0;
+    let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc, dma_ch);
 
     let mut buf = [0u8; 1];
     let status = i2c.write_read(CST816S_ADDR, &[REG_VERSION], &mut buf);
@@ -305,7 +302,6 @@ fn main() -> ! {
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     redraw_screen(
         &mut st7789,
-        &mut dma_ch0,
         &mut timer,
         scroll_offset,
         &test_colors,
@@ -333,7 +329,6 @@ fn main() -> ! {
         if scroll_offset_changed {
             redraw_screen(
                 &mut st7789,
-                &mut dma_ch0,
                 &mut timer,
                 scroll_offset,
                 &test_colors,
