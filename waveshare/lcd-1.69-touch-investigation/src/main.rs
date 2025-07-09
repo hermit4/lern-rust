@@ -5,6 +5,8 @@
 #[used]
 static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
+mod display;
+use crate::display::St7789Interface;
 use crate::pac::interrupt;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -19,7 +21,7 @@ use embedded_hal::{
 use hal::multicore::{Multicore, Stack};
 use hal::{
     clocks::{init_clocks_and_plls, Clock},
-    dma::{single_buffer::Config, Channel, ChannelIndex, DMAExt},
+    dma::{ChannelIndex, DMAExt},
     entry,
     fugit::{Hertz, RateExtU32},
     gpio::{bank0::*, FunctionI2C, Interrupt as GpioInterrupt, Pin, PullUp},
@@ -54,61 +56,6 @@ static TOUCH_Y: AtomicU16 = AtomicU16::new(0);
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 static G_I2C: Mutex<RefCell<Option<SharedI2C>>> = Mutex::new(RefCell::new(None));
 static mut TX_BUFFER: [u8; TRANSFER_SIZE] = [0; TRANSFER_SIZE];
-pub struct St7789Interface<SPI, CS, DC, CHI>
-where
-    CHI: ChannelIndex,
-{
-    spi: Option<SPI>,
-    cs: CS,
-    dc: DC,
-    dma_ch: Option<Channel<CHI>>,
-}
-
-impl<SPI, CS, DC, CHI> St7789Interface<SPI, CS, DC, CHI>
-where
-    SPI: SpiBus + rp2040_hal::dma::WriteTarget<TransmittedWord = u8>,
-    CS: OutputPin,
-    DC: OutputPin,
-    CHI: ChannelIndex,
-{
-    pub fn new(spi: SPI, cs: CS, dc: DC, dma_ch: Channel<CHI>) -> Self {
-        Self {
-            spi: Some(spi),
-            cs,
-            dc,
-            dma_ch: Some(dma_ch),
-        }
-    }
-    pub fn write_command(&mut self, cmd: u8) {
-        self.cs.set_low().ok();
-        self.dc.set_low().ok();
-        let mut spi = self.spi.take().unwrap();
-        spi.write(&[cmd]).ok();
-        self.spi = Some(spi);
-        self.cs.set_high().ok();
-    }
-
-    pub fn write_data(&mut self, data: &[u8]) {
-        self.cs.set_low().ok();
-        self.dc.set_high().ok();
-        let mut spi = self.spi.take().unwrap();
-        spi.write(data).ok();
-        self.spi = Some(spi);
-        self.cs.set_high().ok();
-    }
-    pub fn write_dma_blocking(&mut self, buf: &'static [u8]) {
-        self.cs.set_low().ok();
-        self.dc.set_high().ok();
-
-        let spi = self.spi.take().unwrap();
-        let dma_ch = self.dma_ch.take().unwrap();
-        let (ch_bk, _buf_back, mut spi_bk) = Config::new(dma_ch, buf, spi).start().wait();
-        spi_bk.flush().ok();
-        self.dma_ch = Some(ch_bk);
-        self.spi = Some(spi_bk);
-        self.cs.set_high().ok();
-    }
-}
 
 fn redraw_screen<SPI, CS, DC, CHI>(
     st7789: &mut St7789Interface<SPI, CS, DC, CHI>,
