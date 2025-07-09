@@ -19,9 +19,9 @@ use embedded_hal::{
 use hal::multicore::{Multicore, Stack};
 use hal::{
     clocks::{init_clocks_and_plls, Clock},
+    dma::{single_buffer::Config, Channel, ChannelIndex, DMAExt},
     entry,
     fugit::{Hertz, RateExtU32},
-    dma::{DMAExt ,ChannelIndex, Channel},
     gpio::{bank0::*, FunctionI2C, Interrupt as GpioInterrupt, Pin, PullUp},
     pac,
     sio::Sio,
@@ -58,10 +58,10 @@ pub struct St7789Interface<SPI, CS, DC, CHI>
 where
     CHI: ChannelIndex,
 {
-    spi: SPI,
+    spi: Option<SPI>,
     cs: CS,
     dc: DC,
-    dma_ch: Channel<CHI>,
+    dma_ch: Option<Channel<CHI>>,
 }
 
 impl<SPI, CS, DC, CHI> St7789Interface<SPI, CS, DC, CHI>
@@ -72,53 +72,53 @@ where
     CHI: ChannelIndex,
 {
     pub fn new(spi: SPI, cs: CS, dc: DC, dma_ch: Channel<CHI>) -> Self {
-        Self { spi, cs, dc, dma_ch }
+        Self {
+            spi: Some(spi),
+            cs,
+            dc,
+            dma_ch: Some(dma_ch),
+        }
     }
     pub fn write_command(&mut self, cmd: u8) {
         self.cs.set_low().ok();
         self.dc.set_low().ok();
-        self.spi.write(&[cmd]).ok();
+        let mut spi = self.spi.take().unwrap();
+        spi.write(&[cmd]).ok();
+        self.spi = Some(spi);
         self.cs.set_high().ok();
     }
 
     pub fn write_data(&mut self, data: &[u8]) {
         self.cs.set_low().ok();
         self.dc.set_high().ok();
-        self.spi.write(data).ok();
+        let mut spi = self.spi.take().unwrap();
+        spi.write(data).ok();
+        self.spi = Some(spi);
         self.cs.set_high().ok();
     }
-    pub fn write_dma_blocking(
-        &mut self,
-        buf: &'static [u8],
-    ){
-        use rp2040_hal::dma::single_buffer::Config;
-        use core::ptr;
-
+    pub fn write_dma_blocking(&mut self, buf: &'static [u8]) {
         self.cs.set_low().ok();
         self.dc.set_high().ok();
 
-        let spi_owned     = unsafe { ptr::read(&self.spi) };
-        let channel_owned = unsafe { ptr::read(&self.dma_ch) };
-        let (ch_back, _buf_back, spi_back) = Config::new(channel_owned, buf, spi_owned).start().wait();
-        unsafe {
-            ptr::write(&mut self.dma_ch, ch_back);
-            ptr::write(&mut self.spi, spi_back);
-        }
-        self.spi.flush().ok();
+        let spi = self.spi.take().unwrap();
+        let dma_ch = self.dma_ch.take().unwrap();
+        let (ch_bk, _buf_back, mut spi_bk) = Config::new(dma_ch, buf, spi).start().wait();
+        spi_bk.flush().ok();
+        self.dma_ch = Some(ch_bk);
+        self.spi = Some(spi_bk);
         self.cs.set_high().ok();
     }
 }
 
-
 fn redraw_screen<SPI, CS, DC, CHI>(
-    st7789 : &mut St7789Interface<SPI, CS, DC, CHI>,
-    timer  : &mut Timer,
-    offset : usize,
-    colors : &[u16],
+    st7789: &mut St7789Interface<SPI, CS, DC, CHI>,
+    timer: &mut Timer,
+    offset: usize,
+    colors: &[u16],
 ) where
     SPI: SpiBus<u8> + rp2040_hal::dma::WriteTarget<TransmittedWord = u8>,
-    CS : OutputPin,
-    DC : OutputPin,
+    CS: OutputPin,
+    DC: OutputPin,
     CHI: ChannelIndex,
 {
     let start = timer.get_counter();
@@ -300,12 +300,7 @@ fn main() -> ! {
     let mut prev_y: u16 = (SCREEN_HEIGHT + 1) as u16;
     let mut scroll_offset = 0;
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
-    redraw_screen(
-        &mut st7789,
-        &mut timer,
-        scroll_offset,
-        &test_colors,
-    );
+    redraw_screen(&mut st7789, &mut timer, scroll_offset, &test_colors);
     lcd_bl.set_high().unwrap();
     loop {
         let y = TOUCH_Y.load(Ordering::Acquire);
@@ -327,12 +322,7 @@ fn main() -> ! {
         }
 
         if scroll_offset_changed {
-            redraw_screen(
-                &mut st7789,
-                &mut timer,
-                scroll_offset,
-                &test_colors,
-            );
+            redraw_screen(&mut st7789, &mut timer, scroll_offset, &test_colors);
         }
         cortex_m::asm::wfe();
     }
