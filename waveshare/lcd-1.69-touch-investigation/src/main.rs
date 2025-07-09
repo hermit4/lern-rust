@@ -38,8 +38,8 @@ const CST816S_ADDR: u8 = 0x15;
 const REG_VERSION: u8 = 0xA7;
 const REG_DATA: u8 = 0x01;
 const SCREEN_HEIGHT: usize = 280;
+const SCREEN_WIDTH: usize = 240;
 const BAND_HEIGHT: usize = 56;
-const TRANSFER_SIZE: usize = 240 * 2;
 
 type IrqPin = Pin<Gpio21, hal::gpio::FunctionSio<hal::gpio::SioInput>, PullUp>;
 type SharedI2C = I2C<
@@ -55,10 +55,9 @@ static TOUCH_X: AtomicU16 = AtomicU16::new(0);
 static TOUCH_Y: AtomicU16 = AtomicU16::new(0);
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 static G_I2C: Mutex<RefCell<Option<SharedI2C>>> = Mutex::new(RefCell::new(None));
-static mut TX_BUFFER: [u8; TRANSFER_SIZE] = [0; TRANSFER_SIZE];
 
-fn redraw_screen<SPI, CS, DC, CHI>(
-    st7789: &mut St7789Interface<SPI, CS, DC, CHI>,
+fn redraw_screen<SPI, CS, DC, RST, CHI>(
+    st7789: &mut St7789Interface<SPI, CS, DC, RST, CHI>,
     timer: &mut Timer,
     offset: usize,
     colors: &[u16],
@@ -66,6 +65,7 @@ fn redraw_screen<SPI, CS, DC, CHI>(
     SPI: SpiBus<u8> + rp2040_hal::dma::WriteTarget<TransmittedWord = u8>,
     CS: OutputPin,
     DC: OutputPin,
+    RST: OutputPin,
     CHI: ChannelIndex,
 {
     let start = timer.get_counter();
@@ -73,16 +73,11 @@ fn redraw_screen<SPI, CS, DC, CHI>(
         let logical_y = (offset + y) % SCREEN_HEIGHT;
         let band = logical_y / BAND_HEIGHT;
         let color = colors[band];
-        let hi = (color >> 8) as u8;
-        let lo = (color & 0xFF) as u8;
-        unsafe {
-            for px in TX_BUFFER.chunks_exact_mut(2) {
-                px[0] = hi;
-                px[1] = lo;
+        st7789.process_line(y, 0..SCREEN_WIDTH, |buf| {
+            for px in buf.iter_mut() {
+                *px = color;
             }
-        }
-        st7789.write_dma_blocking(unsafe { &TX_BUFFER });
-        //st7789.write_data(unsafe{&TX_BUFFER});
+        });
     }
     let end = timer.get_counter();
     let micros = (end - start).to_micros();
@@ -181,15 +176,13 @@ fn main() -> ! {
     let lcd_cs = pins.gpio9.into_push_pull_output();
     let lcd_clk = pins.gpio10.into_function::<hal::gpio::FunctionSpi>();
     let lcd_din = pins.gpio11.into_function::<hal::gpio::FunctionSpi>();
-    let mut lcd_rst = pins.gpio13.into_push_pull_output();
+    let lcd_rst = pins.gpio13.into_push_pull_output();
     let mut lcd_bl = pins.gpio15.into_push_pull_output();
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     tp_rst.set_low().unwrap();
-    lcd_rst.set_low().unwrap();
     delay.delay_ms(100);
     tp_rst.set_high().unwrap();
-    lcd_rst.set_high().unwrap();
     delay.delay_ms(200);
 
     let spi = Spi::<_, _, _, 8>::new(pac.SPI1, (lcd_din, lcd_clk)).init(
@@ -200,7 +193,8 @@ fn main() -> ! {
     );
 
     let dma_ch = pac.DMA.split(&mut pac.RESETS).ch0;
-    let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc, dma_ch);
+    let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc, lcd_rst, dma_ch);
+    st7789.init(&mut delay);
 
     let mut buf = [0u8; 1];
     let status = i2c.write_read(CST816S_ADDR, &[REG_VERSION], &mut buf);
@@ -218,24 +212,6 @@ fn main() -> ! {
     let cores = multicore.cores();
     let core1 = &mut cores[1];
     let _ = core1.spawn(unsafe { CORE1_STACK.take().unwrap() }, touch_task);
-
-    st7789.write_command(0x01); // software reset
-    delay.delay_ms(120);
-    st7789.write_command(0x11); // sleep out
-    delay.delay_ms(120);
-    st7789.write_command(0x3A); // pixel format
-    st7789.write_data(&[0x55]); // RGB565
-    st7789.write_command(0x36); // MADCTL
-    st7789.write_data(&[0x00]); // BGR, no rotet
-    st7789.write_command(0x21); // INVON
-    st7789.write_command(0x29); // Display on
-    delay.delay_ms(20);
-
-    st7789.write_command(0x2A); // Column
-    st7789.write_data(&[0x00, 0x00, 0x00, 0xEF]);
-    st7789.write_command(0x2B); // Row
-    st7789.write_data(&[0x00, 0x14, 0x01, 0x2B]);
-    st7789.write_command(0x2C);
 
     let test_colors = [
         0xF800, // Red
