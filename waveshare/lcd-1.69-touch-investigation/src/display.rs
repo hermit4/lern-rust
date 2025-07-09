@@ -52,12 +52,6 @@ where
         self.write_command(0x21); // INVON
         self.write_command(0x29); // Display on
         delay.delay_ms(20);
-
-        self.write_command(0x2A); // Column
-        self.write_data(&[0x00, 0x00, 0x00, 0xEF]);
-        self.write_command(0x2B); // Row
-        self.write_data(&[0x00, 0x14, 0x01, 0x2B]);
-        self.write_command(0x2C);
     }
 
     pub fn write_command(&mut self, cmd: u8) {
@@ -65,6 +59,7 @@ where
         self.dc.set_low().ok();
         if let Some(spi) = &mut self.spi {
             spi.write(&[cmd]).ok();
+            unsafe { while (*SPI1::ptr()).sspsr().read().bsy().bit_is_set() {} }
         }
         self.cs.set_high().ok();
     }
@@ -74,6 +69,7 @@ where
         self.dc.set_high().ok();
         if let Some(spi) = &mut self.spi {
             spi.write(data).ok();
+            unsafe { while (*SPI1::ptr()).sspsr().read().bsy().bit_is_set() {} }
         }
         self.cs.set_high().ok();
     }
