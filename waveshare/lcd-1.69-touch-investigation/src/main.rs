@@ -240,9 +240,9 @@ fn main() -> ! {
     redraw_screen(&mut st7789, &mut timer, scroll_offset, &test_colors);
     lcd_bl.set_high().unwrap();
     loop {
-        let mut x = TOUCH_X.load(Ordering::Acquire);
+        let x = TOUCH_X.load(Ordering::Acquire);
         let mut y = TOUCH_Y.load(Ordering::Acquire);
-        (x, y) = st7789.convert_point(x, y);
+        (_, y) = st7789.convert_point(x, y);
         let mut scroll_offset_changed = false;
         if y < st7789.height() as u16 {
             if prev_y > st7789.height() as u16 {

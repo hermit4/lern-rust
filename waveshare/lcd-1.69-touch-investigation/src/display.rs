@@ -9,6 +9,7 @@ use embedded_hal::spi::SpiBus;
 use rp2040_hal::dma::single_buffer::Config;
 use rp2040_hal::dma::{Channel, ChannelIndex, WriteTarget};
 use rp2040_hal::pac::SPI1;
+use slint::platform::software_renderer::{LineBufferProvider, Rgb565Pixel};
 
 #[derive(Copy, Clone)]
 pub enum DisplayRotation {
@@ -42,6 +43,13 @@ fn create_tx_buf(size: usize) -> &'static mut [u8] {
 
 fn convert_u16_le_to_be_u8(dst: &mut [u8], src: &[u16]) {
     for (chunk, &val) in dst.chunks_exact_mut(2).zip(src.iter()) {
+        let swapped = val.swap_bytes();
+        chunk.copy_from_slice(&swapped.to_ne_bytes());
+    }
+}
+
+fn convert_rgb565_le_to_be_u8(dst: &mut [u8], src: &[Rgb565Pixel]) {
+    for (chunk, &Rgb565Pixel(val)) in dst.chunks_exact_mut(2).zip(src.iter()) {
         let swapped = val.swap_bytes();
         chunk.copy_from_slice(&swapped.to_ne_bytes());
     }
@@ -239,5 +247,48 @@ where
             DisplayRotation::Deg0 | DisplayRotation::Deg180 => SCREEN_WIDTH,
             DisplayRotation::Deg90 | DisplayRotation::Deg270 => SCREEN_HEIGHT,
         }
+    }
+
+    pub fn size(&mut self) -> slint::PhysicalSize {
+        let width = self.width();
+        let height = self.height();
+        slint::PhysicalSize::new(self.width() as u32, self.height() as u32)
+    }
+}
+
+impl<SPI, CS, DC, RST, CHI> LineBufferProvider for St7789Interface<SPI, CS, DC, RST, CHI>
+where
+    SPI: SpiBus + WriteTarget<TransmittedWord = u8>,
+    CS: OutputPin,
+    DC: OutputPin,
+    RST: OutputPin,
+    CHI: ChannelIndex,
+{
+    type TargetPixel = Rgb565Pixel;
+    fn process_line(
+        &mut self,
+        line: usize,
+        range: core::ops::Range<usize>,
+        render_fn: impl FnOnce(&mut [Rgb565Pixel]),
+    ) {
+        let mut line_buf = [Rgb565Pixel(0); SCREEN_MAX];
+        let width = range.len();
+        render_fn(&mut line_buf[..width]);
+        let tx_buf = &mut self.tx_buf[..width * 2];
+        convert_rgb565_le_to_be_u8(tx_buf, &line_buf[..width]);
+        let tx_buf_static: &'static [u8] =
+            unsafe { core::slice::from_raw_parts(tx_buf.as_ptr(), tx_buf.len()) };
+        const SCREEN_OFFSET: usize = 0x14;
+        let row = match self.rotation {
+            DisplayRotation::Deg0 | DisplayRotation::Deg180 => line + SCREEN_OFFSET,
+            DisplayRotation::Deg90 | DisplayRotation::Deg270 => line,
+        };
+        let drange = match self.rotation {
+            DisplayRotation::Deg0 | DisplayRotation::Deg180 => range,
+            DisplayRotation::Deg90 | DisplayRotation::Deg270 => {
+                range.start + SCREEN_OFFSET..range.end + SCREEN_OFFSET
+            }
+        };
+        self.write_dma_blocking(tx_buf_static, row, drange);
     }
 }
