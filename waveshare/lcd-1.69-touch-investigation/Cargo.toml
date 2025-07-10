@@ -14,6 +14,8 @@ defmt-rtt = "1"
 panic-probe = { version = "1", features = ["print-defmt"] }
 rp2040-hal = { version = "0.11", features = ["rt", "critical-section-impl", "defmt"] }
 rp2040-boot2 = "0.3.0"
+embedded-alloc = "0.6.0"
+
 
 [profile.release]
 opt-level = 3

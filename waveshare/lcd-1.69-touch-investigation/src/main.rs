@@ -5,14 +5,16 @@
 #[used]
 static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
+extern crate alloc;
 mod display;
-use crate::display::St7789Interface;
+use crate::display::{DisplayRotation, St7789Interface};
 use crate::pac::interrupt;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use cortex_m::interrupt::Mutex;
 use defmt::*;
 use defmt_rtt as _;
+use embedded_alloc::LlffHeap as Heap;
 use embedded_hal::{
     digital::{InputPin, OutputPin},
     i2c::I2c,
@@ -33,12 +35,14 @@ use hal::{
 use panic_probe as _;
 use rp2040_hal as hal;
 
+#[global_allocator]
+static ALLOCATOR: Heap = Heap::empty();
+
+const HEAP_SIZE: usize = 200 * 1024;
 const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(33_300_000);
 const CST816S_ADDR: u8 = 0x15;
 const REG_VERSION: u8 = 0xA7;
 const REG_DATA: u8 = 0x01;
-const SCREEN_HEIGHT: usize = 280;
-const SCREEN_WIDTH: usize = 240;
 const BAND_HEIGHT: usize = 56;
 
 type IrqPin = Pin<Gpio21, hal::gpio::FunctionSio<hal::gpio::SioInput>, PullUp>;
@@ -49,6 +53,7 @@ type SharedI2C = I2C<
         Pin<Gpio7, FunctionI2C, PullUp>,
     ),
 >;
+static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
 static TOUCH_IRQ_PENDING: AtomicBool = AtomicBool::new(false);
 static TOUCH_X: AtomicU16 = AtomicU16::new(0);
@@ -69,11 +74,12 @@ fn redraw_screen<SPI, CS, DC, RST, CHI>(
     CHI: ChannelIndex,
 {
     let start = timer.get_counter();
-    for y in 0..SCREEN_HEIGHT {
-        let logical_y = (offset + y) % SCREEN_HEIGHT;
+    for y in 0..st7789.height() {
+        let logical_y = (offset + y) % st7789.height();
         let band = logical_y / BAND_HEIGHT;
         let color = colors[band];
-        st7789.process_line(y, 0..SCREEN_WIDTH, |buf| {
+        let range = { 0..st7789.width() };
+        st7789.process_line(y, range, |buf| {
             for px in buf.iter_mut() {
                 *px = color;
             }
@@ -117,6 +123,7 @@ fn touch_task() {
 #[entry]
 fn main() -> ! {
     info!("Program start");
+    unsafe { ALLOCATOR.init(core::ptr::addr_of_mut!(HEAP) as usize, HEAP_SIZE) }
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
@@ -193,7 +200,8 @@ fn main() -> ! {
     );
 
     let dma_ch = pac.DMA.split(&mut pac.RESETS).ch0;
-    let mut st7789 = St7789Interface::new(spi, lcd_cs, lcd_dc, lcd_rst, dma_ch);
+    let mut st7789 =
+        St7789Interface::new(spi, lcd_cs, lcd_dc, lcd_rst, dma_ch, DisplayRotation::Deg0);
     st7789.init(&mut delay);
 
     let mut buf = [0u8; 1];
@@ -220,28 +228,30 @@ fn main() -> ! {
         0xFFFF, // White
         0x0000, // Black
     ];
-    let mut prev_y: u16 = (SCREEN_HEIGHT + 1) as u16;
+    let mut prev_y: u16 = (st7789.height() + 1) as u16;
     let mut scroll_offset = 0;
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     redraw_screen(&mut st7789, &mut timer, scroll_offset, &test_colors);
     lcd_bl.set_high().unwrap();
     loop {
-        let y = TOUCH_Y.load(Ordering::Acquire);
+        let mut x = TOUCH_X.load(Ordering::Acquire);
+        let mut y = TOUCH_Y.load(Ordering::Acquire);
+        (x, y) = st7789.convert_point(x, y);
         let mut scroll_offset_changed = false;
-        if y < SCREEN_HEIGHT as u16 {
-            if prev_y > SCREEN_HEIGHT as u16 {
+        if y < st7789.height() as u16 {
+            if prev_y > st7789.height() as u16 {
                 prev_y = y;
             } else if prev_y.abs_diff(y) > 1 {
                 if prev_y > y {
-                    scroll_offset = (scroll_offset + prev_y.abs_diff(y) as usize) % SCREEN_HEIGHT;
+                    scroll_offset = (scroll_offset + prev_y.abs_diff(y) as usize) % st7789.height();
                 } else {
-                    scroll_offset = (scroll_offset - prev_y.abs_diff(y) as usize) % SCREEN_HEIGHT;
+                    scroll_offset = (scroll_offset - prev_y.abs_diff(y) as usize) % st7789.height();
                 }
                 scroll_offset_changed = true;
                 prev_y = y;
             }
         } else {
-            prev_y = (SCREEN_HEIGHT + 1) as u16;
+            prev_y = (st7789.height() + 1) as u16;
         }
 
         if scroll_offset_changed {
