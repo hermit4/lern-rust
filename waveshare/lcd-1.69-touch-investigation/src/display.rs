@@ -29,9 +29,9 @@ const SCREEN_MAX: usize = if SCREEN_WIDTH > SCREEN_HEIGHT {
 fn madctl_value(rotation: DisplayRotation) -> u8 {
     match rotation {
         DisplayRotation::Deg0 => 0x00,
-        DisplayRotation::Deg90 => 0x60,
-        DisplayRotation::Deg180 => 0xC0,
-        DisplayRotation::Deg270 => 0xA0,
+        DisplayRotation::Deg90 => 0x20,  // MV
+        DisplayRotation::Deg180 => 0xC0, // MX, MY
+        DisplayRotation::Deg270 => 0x60, // MX, MV
     }
 }
 
@@ -222,9 +222,9 @@ where
     pub fn convert_point(&mut self, x: u16, y: u16) -> (u16, u16) {
         let ret = match self.rotation {
             DisplayRotation::Deg0 => (x, y),
+            DisplayRotation::Deg90 => (y, x),
             DisplayRotation::Deg180 => (SCREEN_WIDTH as u16 - x, SCREEN_HEIGHT as u16 - y),
-            DisplayRotation::Deg90 => (SCREEN_HEIGHT as u16 - y, SCREEN_WIDTH as u16 - x),
-            DisplayRotation::Deg270 => (y, x),
+            DisplayRotation::Deg270 => (SCREEN_HEIGHT as u16 - y, SCREEN_WIDTH as u16 - x),
         };
         ret
     }
