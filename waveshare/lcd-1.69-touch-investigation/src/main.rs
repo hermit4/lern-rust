@@ -8,6 +8,8 @@ static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 extern crate alloc;
 mod display;
 mod touch;
+use alloc::rc::Rc;
+use alloc::boxed::Box;
 use crate::{
     display::{DisplayRotation, St7789Interface},
     touch::CST816SInterface,
@@ -26,18 +28,38 @@ use hal::{
     pac,
     sio::Sio,
     watchdog::Watchdog,
-    Spi, I2C,
+    Spi, I2C, Timer,
 };
 use panic_probe as _;
 use rp2040_hal as hal;
-
-#[global_allocator]
-static ALLOCATOR: Heap = Heap::empty();
+use slint::platform::software_renderer::MinimalSoftwareWindow;
+use slint::platform::Platform;
+use slint::platform::WindowEvent;
+use slint::LogicalPosition;
+use slint::platform::PointerEventButton;
 
 const HEAP_SIZE: usize = 200 * 1024;
 const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(33_300_000);
 
+#[global_allocator]
+static ALLOCATOR: Heap = Heap::empty();
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+
+slint::include_modules!();
+
+struct MyPlatform {
+    window: Rc<MinimalSoftwareWindow>,
+    timer: hal::Timer,
+}
+
+impl Platform for MyPlatform {
+    fn create_window_adapter(&self) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+        Ok(self.window.clone())
+    }
+    fn duration_since_start(&self) -> core::time::Duration {
+        core::time::Duration::from_micros(self.timer.get_counter().ticks())
+    }
+}
 
 #[entry]
 fn main() -> ! {
@@ -115,23 +137,57 @@ fn main() -> ! {
     );
     st7789.init(&mut delay);
     lcd_bl.set_high().ok();
+
+    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let window = MinimalSoftwareWindow::new(Default::default());
+    window.set_size(st7789.size());
+    slint::platform::set_platform(Box::new(MyPlatform {
+        window: window.clone(),
+        timer: timer,
+    })).unwrap();
+
+    let ui = AppWindow::new().unwrap();
+    ui.on_request_increase_value({
+        let ui_handle = ui.as_weak();
+        move || {
+            let ui = ui_handle.unwrap();
+            ui.set_counter(ui.get_counter() + 1);
+        }
+    });
+    ui.run().ok();
+
     let mut touch_state = TouchState::None;
     loop {
+        slint::platform::update_timers_and_animations();
+        window.draw_if_needed(|renderer| {
+            renderer.render_by_line(&mut st7789);
+        });
+
         if let Ok(status) = cst816s.read_touch_status(&mut touch_state) {
             match status {
                 TouchStatus::TouchDown { x, y } => {
-                    info!("down {},{}", x, y);
+                    let (x,y) = st7789.convert_point(x,y);
+                    window.dispatch_event(WindowEvent::PointerPressed {
+                        position: LogicalPosition::new(x.into(),y.into()),
+                        button: PointerEventButton::Left,
+                    });
                 }
                 TouchStatus::TouchUp { x, y } => {
-                    info!("up {},{}", x, y);
+                    let (x,y) = st7789.convert_point(x,y);
+                    window.dispatch_event(WindowEvent::PointerReleased {
+                        position: LogicalPosition::new(x.into(),y.into()),
+                        button: PointerEventButton::Left,
+                    });
                 }
                 TouchStatus::TouchMove { x, y } => {
-                    info!("move {},{}", x, y);
+                    let (x,y) = st7789.convert_point(x,y);
+                    window.dispatch_event(WindowEvent::PointerMoved {
+                        position: LogicalPosition::new(x.into(),y.into()),
+                    });
                 }
                 TouchStatus::None => {}
             }
         }
-
         cortex_m::asm::wfe();
     }
 }

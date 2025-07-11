@@ -1,7 +1,6 @@
-#![no_std]
 use crate::pac::interrupt;
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use cortex_m::interrupt::Mutex;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::i2c::I2c;
@@ -32,7 +31,7 @@ pub enum TouchStatus {
 
 pub struct CST816SInterface<I2C, RST> {
     i2c: Option<I2C>,
-    rst: RST,
+    _rst: RST,
 }
 
 impl<I2C, RST, E> CST816SInterface<I2C, RST>
@@ -46,8 +45,6 @@ where
         rst.set_high().ok();
         cortex_m::asm::delay(100_000);
 
-        let mut buf = [0u8; 1];
-        i2c.write_read(CST816S_ADDR, &[0xA7], &mut buf)?;
         i2c.write(CST816S_ADDR, &[0xEC, 0x00])?;
         i2c.write(CST816S_ADDR, &[0xFA, 0x60])?;
         cortex_m::interrupt::free(|cs| {
@@ -64,7 +61,7 @@ where
         }
         Ok(Self {
             i2c: Some(i2c),
-            rst,
+            _rst: rst,
         })
     }
 

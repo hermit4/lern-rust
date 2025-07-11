@@ -1,5 +1,3 @@
-#![no_std]
-
 extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -231,9 +229,9 @@ where
     pub fn convert_point(&mut self, x: u16, y: u16) -> (u16, u16) {
         let ret = match self.rotation {
             DisplayRotation::Deg0 => (x, y),
-            DisplayRotation::Deg90 => (y, x),
+            DisplayRotation::Deg90 => (SCREEN_HEIGHT as u16 - y, x),
             DisplayRotation::Deg180 => (SCREEN_WIDTH as u16 - x, SCREEN_HEIGHT as u16 - y),
-            DisplayRotation::Deg270 => (SCREEN_HEIGHT as u16 - y, SCREEN_WIDTH as u16 - x),
+            DisplayRotation::Deg270 => (y,SCREEN_WIDTH as u16 - x),
         };
         ret
     }
@@ -251,13 +249,13 @@ where
     }
 
     pub fn size(&mut self) -> slint::PhysicalSize {
-        let width = self.width();
-        let height = self.height();
-        slint::PhysicalSize::new(self.width() as u32, self.height() as u32)
+        let width = self.width() as u32;
+        let height = self.height() as u32;
+        slint::PhysicalSize::new(width, height)
     }
 }
 
-impl<SPI, CS, DC, RST, CHI> LineBufferProvider for St7789Interface<SPI, CS, DC, RST, CHI>
+impl<SPI, CS, DC, RST, CHI> LineBufferProvider for &mut St7789Interface<SPI, CS, DC, RST, CHI>
 where
     SPI: SpiBus + WriteTarget<TransmittedWord = u8>,
     CS: OutputPin,
