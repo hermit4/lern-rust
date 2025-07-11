@@ -10,12 +10,15 @@ mod display;
 mod touch;
 use alloc::rc::Rc;
 use alloc::boxed::Box;
+use crate::pac::interrupt;
 use crate::{
     display::{DisplayRotation, St7789Interface},
     touch::CST816SInterface,
     touch::TouchState,
     touch::TouchStatus,
 };
+use core::cell::RefCell;
+use cortex_m::interrupt::Mutex;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_alloc::LlffHeap as Heap;
@@ -24,11 +27,12 @@ use hal::{
     clocks::{init_clocks_and_plls, Clock},
     dma::DMAExt,
     entry,
-    fugit::{Hertz, RateExtU32},
+    fugit::{self, Hertz, RateExtU32},
     pac,
     sio::Sio,
     watchdog::Watchdog,
     Spi, I2C, Timer,
+    timer::{Alarm,Alarm0},
 };
 use panic_probe as _;
 use rp2040_hal as hal;
@@ -44,6 +48,8 @@ const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(33_300_000);
 #[global_allocator]
 static ALLOCATOR: Heap = Heap::empty();
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+
+static ALARM0: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
 
 slint::include_modules!();
 
@@ -138,7 +144,16 @@ fn main() -> ! {
     st7789.init(&mut delay);
     lcd_bl.set_high().ok();
 
-    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let mut alarm0 = timer.alarm_0().unwrap();
+    alarm0.enable_interrupt();
+    cortex_m::interrupt::free(|cs| {
+        ALARM0.borrow(cs).replace(Some(alarm0));
+    });
+    unsafe {
+        pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
+    }
+
     let window = MinimalSoftwareWindow::new(Default::default());
     window.set_size(st7789.size());
     slint::platform::set_platform(Box::new(MyPlatform {
@@ -188,6 +203,34 @@ fn main() -> ! {
                 TouchStatus::None => {}
             }
         }
+        if window.has_active_animations() {
+            continue;
+        }
+        let sleep_duration = match slint::platform::duration_until_next_timer_update() {
+            None => None,
+            Some(d) => {
+                let micros = d.as_micros() as u32;
+                if micros < 10 {
+                    // Cannot wait for less than 10µs, or `schedule()` panics
+                    continue;
+                } else {
+                    Some(fugit::MicrosDurationU32::micros(micros))
+                }
+            }
+        };
+        cortex_m::interrupt::free(|cs| {
+            if let Some(duration) = sleep_duration {
+                ALARM0.borrow(cs).borrow_mut().as_mut().unwrap().schedule(duration).unwrap();
+            }
+        });
         cortex_m::asm::wfe();
     }
 }
+
+#[interrupt]
+fn TIMER_IRQ_0() {
+    cortex_m::interrupt::free(|cs| {
+        ALARM0.borrow(cs).borrow_mut().as_mut().unwrap().clear_interrupt();
+    });
+}
+
