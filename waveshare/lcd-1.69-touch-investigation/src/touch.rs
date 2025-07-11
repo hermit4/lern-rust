@@ -45,8 +45,11 @@ where
         rst.set_high().ok();
         cortex_m::asm::delay(100_000);
 
-        i2c.write(CST816S_ADDR, &[0xEC, 0x00])?;
-        i2c.write(CST816S_ADDR, &[0xFA, 0x60])?;
+        i2c.write(CST816S_ADDR, &[0xEC, 0x00])?; // ignore gesture
+        i2c.write(CST816S_ADDR, &[0xEE, 0x05])?; // scan timing
+        i2c.write(CST816S_ADDR, &[0xF9, 0x00])?; // Auto sleep time = 0
+        i2c.write(CST816S_ADDR, &[0xFE, 0x01])?; // Disable auto sleep
+        i2c.write(CST816S_ADDR, &[0xFA, 0x60])?; // interrupt setting
         cortex_m::interrupt::free(|cs| {
             IRQ_PIN.borrow(cs).replace(Some(irq));
             IRQ_PIN

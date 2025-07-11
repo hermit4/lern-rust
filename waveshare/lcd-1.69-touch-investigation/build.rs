@@ -13,9 +13,10 @@ fn main() {
     println!("cargo:rerun-if-changed=memory.x");
 
     slint_build::compile_with_config(
-        "ui/main.slint",
+        "ui/printerdemo.slint",
         slint_build::CompilerConfiguration::new()
             .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer),
     )
     .unwrap();
+    slint_build::print_rustc_flags().unwrap();
 }

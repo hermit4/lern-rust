@@ -229,9 +229,9 @@ where
     pub fn convert_point(&mut self, x: u16, y: u16) -> (u16, u16) {
         let ret = match self.rotation {
             DisplayRotation::Deg0 => (x, y),
-            DisplayRotation::Deg90 => (SCREEN_HEIGHT as u16 - y, x),
-            DisplayRotation::Deg180 => (SCREEN_WIDTH as u16 - x, SCREEN_HEIGHT as u16 - y),
-            DisplayRotation::Deg270 => (y,SCREEN_WIDTH as u16 - x),
+            DisplayRotation::Deg90 => (SCREEN_HEIGHT as u16 - y - 1, x),
+            DisplayRotation::Deg180 => (SCREEN_WIDTH as u16 - x - 1, SCREEN_HEIGHT as u16 - y - 1),
+            DisplayRotation::Deg270 => (y,SCREEN_WIDTH as u16 - x - 1),
         };
         ret
     }

@@ -10,6 +10,7 @@ mod display;
 mod touch;
 use alloc::rc::Rc;
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use crate::pac::interrupt;
 use crate::{
     display::{DisplayRotation, St7789Interface},
@@ -19,7 +20,6 @@ use crate::{
 };
 use core::cell::RefCell;
 use cortex_m::interrupt::Mutex;
-use defmt::*;
 use defmt_rtt as _;
 use embedded_alloc::LlffHeap as Heap;
 use embedded_hal::digital::OutputPin;
@@ -41,8 +41,9 @@ use slint::platform::Platform;
 use slint::platform::WindowEvent;
 use slint::LogicalPosition;
 use slint::platform::PointerEventButton;
+use slint::Model;
 
-const HEAP_SIZE: usize = 200 * 1024;
+const HEAP_SIZE: usize = 180 * 1024;
 const SPI_ST7789VW_MAX_FREQ: Hertz<u32> = Hertz::<u32>::Hz(33_300_000);
 
 #[global_allocator]
@@ -67,9 +68,27 @@ impl Platform for MyPlatform {
     }
 }
 
+struct PrinterQueueData {
+    data: Rc<slint::VecModel<PrinterQueueItem>>,
+    print_progress_timer: slint::Timer,
+}
+
+impl PrinterQueueData {
+    fn push_job(&self, title: slint::SharedString) {
+        self.data.push(PrinterQueueItem {
+            status: JobStatus::Waiting,
+            progress: 0,
+            title,
+            owner: env!("CARGO_PKG_AUTHORS").into(),
+            pages: 1,
+            size: "100kB".into(),
+            submission_date: "".into(),
+        })
+    }
+}
+
 #[entry]
 fn main() -> ! {
-    info!("Program start");
     unsafe { ALLOCATOR.init(core::ptr::addr_of_mut!(HEAP) as usize, HEAP_SIZE) }
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
@@ -125,6 +144,7 @@ fn main() -> ! {
     let lcd_din = pins.gpio11.into_function::<hal::gpio::FunctionSpi>();
     let lcd_rst = pins.gpio13.into_push_pull_output();
     let mut lcd_bl = pins.gpio15.into_push_pull_output();
+    let mut led = pins.gpio25.into_push_pull_output();
     let spi = Spi::<_, _, _, 8>::new(pac.SPI1, (lcd_din, lcd_clk)).init(
         &mut pac.RESETS,
         clocks.peripheral_clock.freq(),
@@ -143,6 +163,7 @@ fn main() -> ! {
     );
     st7789.init(&mut delay);
     lcd_bl.set_high().ok();
+    led.set_high().ok();
 
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     let mut alarm0 = timer.alarm_0().unwrap();
@@ -161,15 +182,65 @@ fn main() -> ! {
         timer: timer,
     })).unwrap();
 
-    let ui = AppWindow::new().unwrap();
-    ui.on_request_increase_value({
-        let ui_handle = ui.as_weak();
-        move || {
-            let ui = ui_handle.unwrap();
-            ui.set_counter(ui.get_counter() + 1);
-        }
+    let main_window = MainWindow::new().unwrap();
+    main_window.set_ink_levels(
+        [
+            InkLevel { color: slint::Color::from_rgb_u8(0, 255, 255), level: 0.40 },
+            InkLevel { color: slint::Color::from_rgb_u8(255, 0, 255), level: 0.20 },
+            InkLevel { color: slint::Color::from_rgb_u8(255, 255, 0), level: 0.50 },
+            InkLevel { color: slint::Color::from_rgb_u8(0, 0, 0), level: 0.80 },
+        ]
+        .into(),
+    );
+
+    let default_queue: Vec<PrinterQueueItem> =
+        main_window.global::<PrinterQueue>().get_printer_queue().iter().collect();
+    let printer_queue = Rc::new(PrinterQueueData {
+        data: Rc::new(slint::VecModel::from(default_queue.clone())),
+        print_progress_timer: Default::default(),
     });
-    ui.run().ok();
+    main_window.global::<PrinterQueue>().set_printer_queue(printer_queue.data.clone().into());
+
+    main_window.on_quit(move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        slint::quit_event_loop().unwrap();
+    });
+
+    let printer_queue_copy = printer_queue.clone();
+    main_window.global::<PrinterQueue>().on_start_job(move |title| {
+        printer_queue_copy.push_job(title);
+    });
+
+    let printer_queue_copy = printer_queue.clone();
+    main_window.global::<PrinterQueue>().on_cancel_job(move |idx| {
+        printer_queue_copy.data.remove(idx as usize);
+    });
+
+    let printer_queue_weak = Rc::downgrade(&printer_queue);
+    printer_queue.print_progress_timer.start(
+        slint::TimerMode::Repeated,
+        core::time::Duration::from_secs(1),
+        move || {
+            if let Some(printer_queue) = printer_queue_weak.upgrade() {
+                if printer_queue.data.row_count() > 0 {
+                    let mut top_item = printer_queue.data.row_data(0).unwrap();
+                    top_item.progress += 1;
+                    top_item.status = JobStatus::Printing;
+                    if top_item.progress > 100 {
+                        printer_queue.data.remove(0);
+                        if printer_queue.data.row_count() == 0 {
+                            return;
+                        }
+                        top_item = printer_queue.data.row_data(0).unwrap();
+                    }
+                    printer_queue.data.set_row_data(0, top_item);
+                } else {
+                    printer_queue.data.set_vec(default_queue.clone());
+                }
+            }
+        },
+    );
+    // main_window.run().unwrap();
 
     let mut touch_state = TouchState::None;
     loop {
