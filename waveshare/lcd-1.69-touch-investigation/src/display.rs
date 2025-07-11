@@ -6,6 +6,7 @@ use alloc::vec;
 use core::ops::Range;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::SpiBus;
+use panic_probe as _;
 use rp2040_hal::dma::single_buffer::Config;
 use rp2040_hal::dma::{Channel, ChannelIndex, WriteTarget};
 use rp2040_hal::pac::SPI1;
