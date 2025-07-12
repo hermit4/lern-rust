@@ -155,8 +155,14 @@ fn main() -> ! {
     );
 
     let dma_ch = pac.DMA.split(&mut pac.RESETS).ch0;
-    let mut st7789 =
-        St7789Interface::new(spi, lcd_cs, lcd_dc, lcd_rst, dma_ch, DisplayRotation::Deg90);
+    let mut st7789 = St7789Interface::new(
+        spi,
+        lcd_cs,
+        lcd_dc,
+        lcd_rst,
+        dma_ch,
+        DisplayRotation::Deg270,
+    );
     st7789.init(&mut delay);
     lcd_bl.set_high().ok();
     led.set_high().ok();

@@ -25,6 +25,7 @@ const SCREEN_MAX: usize = if SCREEN_WIDTH > SCREEN_HEIGHT {
 } else {
     SCREEN_HEIGHT
 };
+const SCREEN_OFFSET: usize = 0x14;
 
 fn madctl_value(rotation: DisplayRotation) -> u8 {
     match rotation {
@@ -38,13 +39,6 @@ fn madctl_value(rotation: DisplayRotation) -> u8 {
 fn create_tx_buf(size: usize) -> &'static mut [u8] {
     let buf: Box<[u8]> = vec![0u8; size].into_boxed_slice();
     Box::leak(buf)
-}
-
-fn convert_u16_le_to_be_u8(dst: &mut [u8], src: &[u16]) {
-    for (chunk, &val) in dst.chunks_exact_mut(2).zip(src.iter()) {
-        let swapped = val.swap_bytes();
-        chunk.copy_from_slice(&swapped.to_ne_bytes());
-    }
 }
 
 fn convert_rgb565_le_to_be_u8(dst: &mut [u8], src: &[Rgb565Pixel]) {
@@ -114,9 +108,18 @@ where
         delay.delay_ms(120);
         self.write_command(0x3A); // pixel format
         self.write_data(&[0x55]); // RGB565
+        self.write_command(0x21); // INVON
+        self.write_command(0x2A); // Column
+        self.write_data(&[0x00, 0x00, 0x00, 0xEF]);
+        self.write_command(0x2B); // Row
+        self.write_data(&[0x00, 0x14, 0x01, 0x2B]);
+        self.write_command(0x2C); // data
+        let pixel_data = [0u8; 240 * 2];
+        for _ in 0..SCREEN_HEIGHT {
+            self.write_data(&pixel_data);
+        }
         self.write_command(0x36); // MADCTL
         self.write_data(&[modctl]); // BGR, no rotet
-        self.write_command(0x21); // INVON
         self.write_command(0x29); // Display on
         delay.delay_ms(20);
     }
@@ -195,37 +198,6 @@ where
         self.cs.set_high().ok();
     }
 
-    pub fn process_line(
-        &mut self,
-        line: usize,
-        range: Range<usize>,
-        render_fn: impl FnOnce(&mut [u16]),
-    ) {
-        let width = range.len();
-
-        let mut line_buf = [0; SCREEN_MAX];
-
-        render_fn(&mut line_buf[..width]);
-
-        let tx_buf = &mut self.tx_buf[..width * 2];
-        convert_u16_le_to_be_u8(tx_buf, &line_buf[..width]);
-        let tx_buf_static: &'static [u8] =
-            unsafe { core::slice::from_raw_parts(tx_buf.as_ptr(), tx_buf.len()) };
-
-        const SCREEN_OFFSET: usize = 0x14;
-        let row = match self.rotation {
-            DisplayRotation::Deg0 | DisplayRotation::Deg180 => line + SCREEN_OFFSET,
-            DisplayRotation::Deg90 | DisplayRotation::Deg270 => line,
-        };
-        let drange = match self.rotation {
-            DisplayRotation::Deg0 | DisplayRotation::Deg180 => range,
-            DisplayRotation::Deg90 | DisplayRotation::Deg270 => {
-                range.start + SCREEN_OFFSET..range.end + SCREEN_OFFSET
-            }
-        };
-        self.write_dma_blocking(tx_buf_static, row, drange);
-    }
-
     pub fn convert_point(&mut self, x: u16, y: u16) -> (u16, u16) {
         let ret = match self.rotation {
             DisplayRotation::Deg0 => (x, y),
@@ -277,7 +249,6 @@ where
         convert_rgb565_le_to_be_u8(tx_buf, &line_buf[..width]);
         let tx_buf_static: &'static [u8] =
             unsafe { core::slice::from_raw_parts(tx_buf.as_ptr(), tx_buf.len()) };
-        const SCREEN_OFFSET: usize = 0x14;
         let row = match self.rotation {
             DisplayRotation::Deg0 | DisplayRotation::Deg180 => line + SCREEN_OFFSET,
             DisplayRotation::Deg90 | DisplayRotation::Deg270 => line,
