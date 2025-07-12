@@ -29,7 +29,7 @@ const SCREEN_MAX: usize = if SCREEN_WIDTH > SCREEN_HEIGHT {
 fn madctl_value(rotation: DisplayRotation) -> u8 {
     match rotation {
         DisplayRotation::Deg0 => 0x00,
-        DisplayRotation::Deg90 => 0x20,  // MV
+        DisplayRotation::Deg90 => 0xA0,
         DisplayRotation::Deg180 => 0xC0, // MX, MY
         DisplayRotation::Deg270 => 0x60, // MX, MV
     }
@@ -231,7 +231,7 @@ where
             DisplayRotation::Deg0 => (x, y),
             DisplayRotation::Deg90 => (SCREEN_HEIGHT as u16 - y - 1, x),
             DisplayRotation::Deg180 => (SCREEN_WIDTH as u16 - x - 1, SCREEN_HEIGHT as u16 - y - 1),
-            DisplayRotation::Deg270 => (y,SCREEN_WIDTH as u16 - x - 1),
+            DisplayRotation::Deg270 => (y, SCREEN_WIDTH as u16 - x - 1),
         };
         ret
     }

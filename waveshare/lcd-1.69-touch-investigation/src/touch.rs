@@ -16,6 +16,14 @@ const REG_DATA: u8 = 0x01;
 static IRQ_PIN: Mutex<RefCell<Option<IrqPin>>> = Mutex::new(RefCell::new(None));
 static TOUCH_IRQ_PENDING: AtomicBool = AtomicBool::new(false);
 
+// adjust position
+const X_FACTOR: f32 = 240.0 / 215.0;
+const X_OFFST: f32 = -14.0 * X_FACTOR;
+const X_MAX: u16 = 240;
+const Y_FACTOR: f32 = 280.0 / 264.0;
+const Y_OFFST: f32 = 0.0 * Y_FACTOR;
+const Y_MAX: u16 = 280;
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum TouchState {
     None,
@@ -80,8 +88,25 @@ where
             .unwrap()
             .write_read(CST816S_ADDR, &[REG_DATA], &mut touch_data)?;
         let finger = touch_data[1];
-        let x = ((touch_data[2] as u16 & 0x0F) << 8) | touch_data[3] as u16;
-        let y = ((touch_data[4] as u16 & 0x0F) << 8) | touch_data[5] as u16;
+        let mut x = ((touch_data[2] as u16 & 0x0F) << 8) | touch_data[3] as u16;
+        let mut y = ((touch_data[4] as u16 & 0x0F) << 8) | touch_data[5] as u16;
+        x = ((x as f32 + X_OFFST) * X_FACTOR) as u16;
+        let x = {
+            if x > X_MAX {
+                X_MAX - 1
+            } else {
+                x
+            }
+        };
+        y = ((y as f32 + Y_OFFST) * Y_FACTOR) as u16;
+        let y = {
+            if y > Y_MAX {
+                Y_MAX - 1
+            } else {
+                y
+            }
+        };
+
         let event = {
             if finger == 0 {
                 match *state {

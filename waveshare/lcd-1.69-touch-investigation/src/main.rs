@@ -8,9 +8,6 @@ static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 extern crate alloc;
 mod display;
 mod touch;
-use alloc::rc::Rc;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use crate::pac::interrupt;
 use crate::{
     display::{DisplayRotation, St7789Interface},
@@ -18,6 +15,9 @@ use crate::{
     touch::TouchState,
     touch::TouchStatus,
 };
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 use cortex_m::interrupt::Mutex;
 use defmt_rtt as _;
@@ -30,17 +30,17 @@ use hal::{
     fugit::{self, Hertz, RateExtU32},
     pac,
     sio::Sio,
+    timer::{Alarm, Alarm0},
     watchdog::Watchdog,
-    Spi, I2C, Timer,
-    timer::{Alarm,Alarm0},
+    Spi, Timer, I2C,
 };
 use panic_probe as _;
 use rp2040_hal as hal;
 use slint::platform::software_renderer::MinimalSoftwareWindow;
 use slint::platform::Platform;
+use slint::platform::PointerEventButton;
 use slint::platform::WindowEvent;
 use slint::LogicalPosition;
-use slint::platform::PointerEventButton;
 use slint::Model;
 
 const HEAP_SIZE: usize = 180 * 1024;
@@ -60,7 +60,9 @@ struct MyPlatform {
 }
 
 impl Platform for MyPlatform {
-    fn create_window_adapter(&self) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+    fn create_window_adapter(
+        &self,
+    ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
         Ok(self.window.clone())
     }
     fn duration_since_start(&self) -> core::time::Duration {
@@ -153,14 +155,8 @@ fn main() -> ! {
     );
 
     let dma_ch = pac.DMA.split(&mut pac.RESETS).ch0;
-    let mut st7789 = St7789Interface::new(
-        spi,
-        lcd_cs,
-        lcd_dc,
-        lcd_rst,
-        dma_ch,
-        DisplayRotation::Deg270,
-    );
+    let mut st7789 =
+        St7789Interface::new(spi, lcd_cs, lcd_dc, lcd_rst, dma_ch, DisplayRotation::Deg90);
     st7789.init(&mut delay);
     lcd_bl.set_high().ok();
     led.set_high().ok();
@@ -180,26 +176,44 @@ fn main() -> ! {
     slint::platform::set_platform(Box::new(MyPlatform {
         window: window.clone(),
         timer: timer,
-    })).unwrap();
+    }))
+    .unwrap();
 
     let main_window = MainWindow::new().unwrap();
     main_window.set_ink_levels(
         [
-            InkLevel { color: slint::Color::from_rgb_u8(0, 255, 255), level: 0.40 },
-            InkLevel { color: slint::Color::from_rgb_u8(255, 0, 255), level: 0.20 },
-            InkLevel { color: slint::Color::from_rgb_u8(255, 255, 0), level: 0.50 },
-            InkLevel { color: slint::Color::from_rgb_u8(0, 0, 0), level: 0.80 },
+            InkLevel {
+                color: slint::Color::from_rgb_u8(0, 255, 255),
+                level: 0.40,
+            },
+            InkLevel {
+                color: slint::Color::from_rgb_u8(255, 0, 255),
+                level: 0.20,
+            },
+            InkLevel {
+                color: slint::Color::from_rgb_u8(255, 255, 0),
+                level: 0.50,
+            },
+            InkLevel {
+                color: slint::Color::from_rgb_u8(0, 0, 0),
+                level: 0.80,
+            },
         ]
         .into(),
     );
 
-    let default_queue: Vec<PrinterQueueItem> =
-        main_window.global::<PrinterQueue>().get_printer_queue().iter().collect();
+    let default_queue: Vec<PrinterQueueItem> = main_window
+        .global::<PrinterQueue>()
+        .get_printer_queue()
+        .iter()
+        .collect();
     let printer_queue = Rc::new(PrinterQueueData {
         data: Rc::new(slint::VecModel::from(default_queue.clone())),
         print_progress_timer: Default::default(),
     });
-    main_window.global::<PrinterQueue>().set_printer_queue(printer_queue.data.clone().into());
+    main_window
+        .global::<PrinterQueue>()
+        .set_printer_queue(printer_queue.data.clone().into());
 
     main_window.on_quit(move || {
         #[cfg(not(target_arch = "wasm32"))]
@@ -207,14 +221,18 @@ fn main() -> ! {
     });
 
     let printer_queue_copy = printer_queue.clone();
-    main_window.global::<PrinterQueue>().on_start_job(move |title| {
-        printer_queue_copy.push_job(title);
-    });
+    main_window
+        .global::<PrinterQueue>()
+        .on_start_job(move |title| {
+            printer_queue_copy.push_job(title);
+        });
 
     let printer_queue_copy = printer_queue.clone();
-    main_window.global::<PrinterQueue>().on_cancel_job(move |idx| {
-        printer_queue_copy.data.remove(idx as usize);
-    });
+    main_window
+        .global::<PrinterQueue>()
+        .on_cancel_job(move |idx| {
+            printer_queue_copy.data.remove(idx as usize);
+        });
 
     let printer_queue_weak = Rc::downgrade(&printer_queue);
     printer_queue.print_progress_timer.start(
@@ -252,23 +270,23 @@ fn main() -> ! {
         if let Ok(status) = cst816s.read_touch_status(&mut touch_state) {
             match status {
                 TouchStatus::TouchDown { x, y } => {
-                    let (x,y) = st7789.convert_point(x,y);
+                    let (x, y) = st7789.convert_point(x, y);
                     window.dispatch_event(WindowEvent::PointerPressed {
-                        position: LogicalPosition::new(x.into(),y.into()),
+                        position: LogicalPosition::new(x.into(), y.into()),
                         button: PointerEventButton::Left,
                     });
                 }
                 TouchStatus::TouchUp { x, y } => {
-                    let (x,y) = st7789.convert_point(x,y);
+                    let (x, y) = st7789.convert_point(x, y);
                     window.dispatch_event(WindowEvent::PointerReleased {
-                        position: LogicalPosition::new(x.into(),y.into()),
+                        position: LogicalPosition::new(x.into(), y.into()),
                         button: PointerEventButton::Left,
                     });
                 }
                 TouchStatus::TouchMove { x, y } => {
-                    let (x,y) = st7789.convert_point(x,y);
+                    let (x, y) = st7789.convert_point(x, y);
                     window.dispatch_event(WindowEvent::PointerMoved {
-                        position: LogicalPosition::new(x.into(),y.into()),
+                        position: LogicalPosition::new(x.into(), y.into()),
                     });
                 }
                 TouchStatus::None => {}
@@ -291,7 +309,13 @@ fn main() -> ! {
         };
         cortex_m::interrupt::free(|cs| {
             if let Some(duration) = sleep_duration {
-                ALARM0.borrow(cs).borrow_mut().as_mut().unwrap().schedule(duration).unwrap();
+                ALARM0
+                    .borrow(cs)
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .schedule(duration)
+                    .unwrap();
             }
         });
         cortex_m::asm::wfe();
@@ -301,7 +325,11 @@ fn main() -> ! {
 #[interrupt]
 fn TIMER_IRQ_0() {
     cortex_m::interrupt::free(|cs| {
-        ALARM0.borrow(cs).borrow_mut().as_mut().unwrap().clear_interrupt();
+        ALARM0
+            .borrow(cs)
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .clear_interrupt();
     });
 }
-
